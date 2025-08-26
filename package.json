@@ -1,0 +1,16 @@
+{
+  "name": "robinhood-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node ./src/discord-bot.js",
+    "register": "node -e \"require('dotenv').config(); require('./src/discord-bot').__register?.().catch(console.error)\"",
+    "dev": "node ./src/discord-bot.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "node-fetch": "^2.7.0"
+  }
+}
