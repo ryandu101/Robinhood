@@ -7,15 +7,15 @@ const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, Events } =
 // --- Slash command definition ---
 const ordersCommand = new SlashCommandBuilder()
   .setName('orders')
-  .setDescription('Get crypto price and order book depth for a ticker (e.g., BTC, ETH)')
+  .setDescription('Get Robinhood crypto quote for a ticker pair')
   .addStringOption(opt => opt
     .setName('ticker')
-    .setDescription('Crypto ticker symbol, e.g., BTC, ETH')
+    .setDescription('Crypto base symbol, e.g., BTC, ETH, DOGE')
     .setRequired(true)
   )
-  .addBooleanOption(opt => opt
-    .setName('book')
-    .setDescription('Include order book depth chart (default: true)')
+  .addStringOption(opt => opt
+    .setName('vs')
+    .setDescription('Counter currency (default: USD)')
     .setRequired(false)
   )
 
@@ -55,43 +55,16 @@ module.exports.__register = async function __register() {
   await registerCommands({ appId, guildId, token })
 }
 
-// --- Market data client ---
+// --- Robinhood crypto data client ---
 const market = require('./robinhood')
 
-function formatPriceLine(symbol, quote) {
-  const p = quote?.price
-  const change = quote?.change
-  const pct = quote?.changePercent
-  const time = quote?.time ? ` @ ${quote.time}` : ''
-  const parts = [
-    `${symbol} ${p != null ? p : '—'}`,
-    change != null ? `${change >= 0 ? '+' : ''}${change}` : undefined,
-    pct != null ? `(${pct >= 0 ? '+' : ''}${pct.toFixed?.(2) ?? pct}%)` : undefined,
-  ].filter(Boolean)
-  return parts.join(' ') + time
-}
-
-function renderDepthChart({ bids, asks, mid }, maxRows = 12, width = 18) {
-  // bids: [[price, size], ...] descending by price
-  // asks: [[price, size], ...] ascending by price
-  const b = (bids || []).slice(0, maxRows)
-  const a = (asks || []).slice(0, maxRows)
-  const maxBidSize = Math.max(...b.map(x => x[1]), 1)
-  const maxAskSize = Math.max(...a.map(x => x[1]), 1)
-  const bidBars = b.map(x => '█'.repeat(Math.max(1, Math.round((x[1] / maxBidSize) * width))))
-  const askBars = a.map(x => '█'.repeat(Math.max(1, Math.round((x[1] / maxAskSize) * width))))
-
+function formatCryptoQuote(symbolPair, q) {
   const lines = []
-  lines.push(`Mid: ${mid ?? '—'}`)
-  lines.push('Bids'.padEnd(width) + '  Price        ' + 'Asks')
-  const rows = Math.max(b.length, a.length)
-  for (let i = 0; i < rows; i++) {
-    const lb = i < b.length ? bidBars[i].padEnd(width) : ' '.repeat(width)
-    const bp = i < b.length ? String(b[i][0]).padStart(8) : ' '.repeat(8)
-    const ap = i < a.length ? String(a[i][0]).padEnd(8) : ' '.repeat(8)
-    const la = i < a.length ? askBars[i] : ''
-    lines.push(`${lb}  ${bp}  |  ${ap} ${la}`)
-  }
+  lines.push(`${symbolPair} — Price: ${q.price}`)
+  if (q.bid != null || q.ask != null) lines.push(`Bid: ${q.bid ?? '—'}  Ask: ${q.ask ?? '—'}`)
+  if (q.high != null || q.low != null) lines.push(`24h High: ${q.high ?? '—'}  Low: ${q.low ?? '—'}`)
+  if (q.change != null || q.changePercent != null) lines.push(`Change: ${q.change ?? '—'} (${q.changePercent != null ? (q.changePercent*100).toFixed(2)+'%' : '—'})`)
+  if (q.time) lines.push(`As of: ${q.time}`)
   return lines.join('\n')
 }
 
@@ -105,28 +78,20 @@ client.once(Events.ClientReady, () => {
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return
   if (interaction.commandName === 'orders') {
-    const ticker = (interaction.options.getString('ticker') || '').trim().toUpperCase()
-    const includeBook = interaction.options.getBoolean('book') ?? true
-
+    const base = (interaction.options.getString('ticker') || '').trim().toUpperCase()
+    const counter = (interaction.options.getString('vs') || 'USD').trim().toUpperCase()
     await interaction.deferReply() // public reply
     try {
-      if (!ticker) {
-        await interaction.editReply('Please provide a crypto ticker, e.g., /orders ticker:BTC')
+      if (!base) {
+        await interaction.editReply('Please provide a crypto ticker, e.g., /orders ticker:BTC [vs:USD]')
         return
       }
-      const symbol = ticker
-      const quote = await market.getCryptoQuote(symbol)
-      if (!includeBook) {
-        await interaction.editReply(formatPriceLine(symbol, quote))
-        return
-      }
-      const book = await market.getCryptoOrderBook(symbol)
-      const chart = renderDepthChart(book)
-      const header = formatPriceLine(symbol, quote)
-      await interaction.editReply(`${header}\n\n${chart}`)
+      const pair = `${base}-${counter}`
+      const quote = await market.getCryptoQuote(base, counter)
+      await interaction.editReply(formatCryptoQuote(pair, quote))
     } catch (err) {
       console.error(err)
-      await interaction.editReply('Error fetching data. Check logs.')
+      await interaction.editReply('Error fetching crypto quote. Ensure your Robinhood API keys are set and have Read crypto quotes allowed.')
     }
   }
 })

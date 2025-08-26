@@ -1,39 +1,47 @@
 // Robinhood Crypto client stub. Align shapes with official docs when available.
 // Provides listOrders() with mock data unless LIVE=true.
 
-const crypto = require('crypto')
 const fetch = require('node-fetch')
+const nacl = require('tweetnacl')
 
 const cfg = {
-  clientId: process.env.RH_CLIENT_ID,
-  apiKey: process.env.RH_API_KEY,
-  sharedSecret: process.env.RH_SHARED_SECRET,
+  apiKey: process.env.RH_API_KEY, // x-api-key
+  privateKeyB64: process.env.RH_PRIVATE_KEY, // base64 seed (32 bytes)
   account: process.env.RH_ACCOUNT_NUMBER,
-  baseUrl: process.env.RH_BASE_URL || 'https://trading.robinhood.com/api/v1/crypto/',
+  baseUrl: (process.env.RH_BASE_URL || 'https://trading.robinhood.com').replace(/\/+$/, ''),
   live: process.env.LIVE === 'true',
 }
 
-function sign({ method, path, body = '' }) {
-  // Placeholder signature: replace per official docs
-  const ts = Date.now().toString()
-  const msg = `${ts}${method}${path}${body}`
-  const sig = crypto.createHmac('sha256', cfg.sharedSecret || 'missing').update(msg).digest('base64')
-  return { ts, sig }
+function sign({ method, path, bodyStr }) {
+  // Per docs: message = f"{api_key}{timestamp}{path}{method}{body}"
+  const ts = Math.floor(Date.now() / 1000)
+  const body = bodyStr || ''
+  const message = `${cfg.apiKey}${ts}${path}${method}${body}`
+  // Derive Ed25519 secretKey from 32-byte seed (base64)
+  if (!cfg.privateKeyB64) throw new Error('Missing RH_PRIVATE_KEY (base64 seed)')
+  const seed = Buffer.from(cfg.privateKeyB64, 'base64')
+  if (seed.length !== 32) throw new Error('RH_PRIVATE_KEY must be a 32-byte base64 seed')
+  const kp = nacl.sign.keyPair.fromSeed(seed)
+  const msgBytes = new TextEncoder().encode(message)
+  const sigBytes = nacl.sign.detached(msgBytes, kp.secretKey)
+  const signature = Buffer.from(sigBytes).toString('base64')
+  return { ts: ts.toString(), signature }
 }
 
 async function http(method, path, data) {
-  const body = data ? JSON.stringify(data) : ''
-  const { ts, sig } = sign({ method, path, body })
-  const url = cfg.baseUrl.replace(/\/+$/, '') + '/' + path.replace(/^\/+/, '')
+  // path must start with /api/v1/...
+  if (!path.startsWith('/')) throw new Error('Path must start with /')
+  const bodyStr = data ? JSON.stringify(data) : ''
+  const { ts, signature } = sign({ method, path, bodyStr })
+  const url = cfg.baseUrl + path
   const headers = {
-    'Content-Type': 'application/json',
+    'Content-Type': 'application/json; charset=utf-8',
     'Accept': 'application/json',
-    'X-Robinhood-API-Key': cfg.apiKey || '',
-    'X-Robinhood-Client-Id': cfg.clientId || '',
-    'X-Robinhood-Signature': sig,
-    'X-Robinhood-Timestamp': ts,
+    'x-api-key': cfg.apiKey || '',
+    'x-signature': signature,
+    'x-timestamp': ts,
   }
-  const res = await fetch(url, { method, headers, body: body || undefined })
+  const res = await fetch(url, { method, headers, body: bodyStr || undefined })
   if (!res.ok) {
     const txt = await res.text()
     const err = new Error(`HTTP ${res.status}: ${txt}`)
@@ -58,7 +66,7 @@ async function listOrders({ limit = 5 } = {}) {
   }
 
   // Replace path and shape per docs when enabled
-  const path = `trading/orders?limit=${encodeURIComponent(limit)}`
+  const path = `/api/v1/crypto/trading/orders/?limit=${encodeURIComponent(limit)}`
   const res = await http('GET', path)
   // Normalize to a basic array shape for Discord
   const items = Array.isArray(res?.results) ? res.results : (Array.isArray(res) ? res : [])
@@ -151,47 +159,40 @@ async function getOptionsSlice(ticker, type, expiry) {
 module.exports.getQuote = getQuote
 module.exports.getOptionsSlice = getOptionsSlice
 
-// --- Crypto market data (Coinbase public endpoints as a placeholder) ---
-async function getCryptoQuote(symbol) {
-  // Coinbase product ids are like BTC-USD
-  const product = `${symbol.toUpperCase()}-USD`
-  const res = await fetch(`https://api.exchange.coinbase.com/products/${product}/ticker`, {
-    headers: { 'User-Agent': 'robinhood-bot/0.1' }
-  })
-  if (!res.ok) throw new Error(`Crypto quote HTTP ${res.status}`)
-  const t = await res.json()
-  const price = parseFloat(t.price)
-  // Coinbase ticker lacks percent; we can fetch 24h stats for change
-  let change, changePercent
-  try {
-    const r2 = await fetch(`https://api.exchange.coinbase.com/products/${product}/stats`, { headers: { 'User-Agent': 'robinhood-bot/0.1' } })
-    if (r2.ok) {
-      const s = await r2.json()
-      const open = parseFloat(s.open)
-      change = price - open
-      changePercent = open ? (change / open) * 100 : undefined
-    }
-  } catch {}
+// --- Robinhood Crypto Quotes ---
+// Requires Read crypto products and Read crypto quotes permissions.
+async function getCryptoProductSymbol(base, counter) {
+  // Confirm trading pair exists via trading_pairs endpoint
+  const symbol = `${base}-${counter}`
+  const path = `/api/v1/crypto/trading/trading_pairs/?symbol=${encodeURIComponent(symbol)}`
+  const res = await http('GET', path)
+  const items = Array.isArray(res?.results) ? res.results : []
+  const ok = items.some(p => (p.symbol === symbol))
+  if (!ok) throw new Error(`Trading pair not found: ${symbol}`)
+  return symbol
+}
+
+async function getCryptoQuote(base, counter = 'USD') {
+  if (!cfg.apiKey || !cfg.privateKeyB64) {
+    throw new Error('Missing Robinhood crypto API env vars (RH_API_KEY, RH_PRIVATE_KEY)')
+  }
+  // Validate pair exists
+  const symbol = await getCryptoProductSymbol(base, counter)
+  // Best bid/ask endpoint per docs
+  const path = `/api/v1/crypto/marketdata/best_bid_ask/?symbol=${encodeURIComponent(symbol)}`
+  const res = await http('GET', path)
+  const item = Array.isArray(res?.results) ? res.results[0] : res?.results
+  if (!item) throw new Error('No market data returned')
   return {
-    price,
-    change,
-    changePercent,
-    time: new Date().toISOString(),
+    price: item?.mid_price ?? undefined,
+    bid: item?.bid_price,
+    ask: item?.ask_price,
+    high: item?.high_price, // if provided; may not exist on this endpoint
+    low: item?.low_price,   // if provided; may not exist on this endpoint
+    change: item?.change,
+    changePercent: item?.change_percent,
+    time: item?.as_of || item?.updated_at,
   }
 }
 
-async function getCryptoOrderBook(symbol, level = 2) {
-  const product = `${symbol.toUpperCase()}-USD`
-  const res = await fetch(`https://api.exchange.coinbase.com/products/${product}/book?level=${level}`, {
-    headers: { 'User-Agent': 'robinhood-bot/0.1' }
-  })
-  if (!res.ok) throw new Error(`Crypto book HTTP ${res.status}`)
-  const data = await res.json()
-  const bids = (data.bids || []).map(([price, size]) => [Number(price), Number(size)])
-  const asks = (data.asks || []).map(([price, size]) => [Number(price), Number(size)])
-  const mid = bids.length && asks.length ? ((bids[0][0] + asks[0][0]) / 2).toFixed(2) : undefined
-  return { bids, asks, mid }
-}
-
 module.exports.getCryptoQuote = getCryptoQuote
-module.exports.getCryptoOrderBook = getCryptoOrderBook
