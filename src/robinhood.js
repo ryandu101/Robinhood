@@ -150,3 +150,48 @@ async function getOptionsSlice(ticker, type, expiry) {
 
 module.exports.getQuote = getQuote
 module.exports.getOptionsSlice = getOptionsSlice
+
+// --- Crypto market data (Coinbase public endpoints as a placeholder) ---
+async function getCryptoQuote(symbol) {
+  // Coinbase product ids are like BTC-USD
+  const product = `${symbol.toUpperCase()}-USD`
+  const res = await fetch(`https://api.exchange.coinbase.com/products/${product}/ticker`, {
+    headers: { 'User-Agent': 'robinhood-bot/0.1' }
+  })
+  if (!res.ok) throw new Error(`Crypto quote HTTP ${res.status}`)
+  const t = await res.json()
+  const price = parseFloat(t.price)
+  // Coinbase ticker lacks percent; we can fetch 24h stats for change
+  let change, changePercent
+  try {
+    const r2 = await fetch(`https://api.exchange.coinbase.com/products/${product}/stats`, { headers: { 'User-Agent': 'robinhood-bot/0.1' } })
+    if (r2.ok) {
+      const s = await r2.json()
+      const open = parseFloat(s.open)
+      change = price - open
+      changePercent = open ? (change / open) * 100 : undefined
+    }
+  } catch {}
+  return {
+    price,
+    change,
+    changePercent,
+    time: new Date().toISOString(),
+  }
+}
+
+async function getCryptoOrderBook(symbol, level = 2) {
+  const product = `${symbol.toUpperCase()}-USD`
+  const res = await fetch(`https://api.exchange.coinbase.com/products/${product}/book?level=${level}`, {
+    headers: { 'User-Agent': 'robinhood-bot/0.1' }
+  })
+  if (!res.ok) throw new Error(`Crypto book HTTP ${res.status}`)
+  const data = await res.json()
+  const bids = (data.bids || []).map(([price, size]) => [Number(price), Number(size)])
+  const asks = (data.asks || []).map(([price, size]) => [Number(price), Number(size)])
+  const mid = bids.length && asks.length ? ((bids[0][0] + asks[0][0]) / 2).toFixed(2) : undefined
+  return { bids, asks, mid }
+}
+
+module.exports.getCryptoQuote = getCryptoQuote
+module.exports.getCryptoOrderBook = getCryptoOrderBook

@@ -7,29 +7,15 @@ const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, Events } =
 // --- Slash command definition ---
 const ordersCommand = new SlashCommandBuilder()
   .setName('orders')
-  .setDescription('Get stock price or options for a ticker')
+  .setDescription('Get crypto price and order book depth for a ticker (e.g., BTC, ETH)')
   .addStringOption(opt => opt
     .setName('ticker')
-    .setDescription('Stock ticker symbol, e.g., AAPL, BABA')
+    .setDescription('Crypto ticker symbol, e.g., BTC, ETH')
     .setRequired(true)
   )
   .addBooleanOption(opt => opt
-    .setName('options')
-    .setDescription('If true, show options chain slice instead of stock quote')
-    .setRequired(false)
-  )
-  .addStringOption(opt => opt
-    .setName('type')
-    .setDescription('Option type (required if options=true)')
-    .addChoices(
-      { name: 'call', value: 'call' },
-      { name: 'put', value: 'put' }
-    )
-    .setRequired(false)
-  )
-  .addStringOption(opt => opt
-    .setName('expiry')
-    .setDescription('Expiry date MM/DD/YY (required if options=true)')
+    .setName('book')
+    .setDescription('Include order book depth chart (default: true)')
     .setRequired(false)
   )
 
@@ -69,8 +55,45 @@ module.exports.__register = async function __register() {
   await registerCommands({ appId, guildId, token })
 }
 
-// --- Market data client (temporary provider) ---
+// --- Market data client ---
 const market = require('./robinhood')
+
+function formatPriceLine(symbol, quote) {
+  const p = quote?.price
+  const change = quote?.change
+  const pct = quote?.changePercent
+  const time = quote?.time ? ` @ ${quote.time}` : ''
+  const parts = [
+    `${symbol} ${p != null ? p : '—'}`,
+    change != null ? `${change >= 0 ? '+' : ''}${change}` : undefined,
+    pct != null ? `(${pct >= 0 ? '+' : ''}${pct.toFixed?.(2) ?? pct}%)` : undefined,
+  ].filter(Boolean)
+  return parts.join(' ') + time
+}
+
+function renderDepthChart({ bids, asks, mid }, maxRows = 12, width = 18) {
+  // bids: [[price, size], ...] descending by price
+  // asks: [[price, size], ...] ascending by price
+  const b = (bids || []).slice(0, maxRows)
+  const a = (asks || []).slice(0, maxRows)
+  const maxBidSize = Math.max(...b.map(x => x[1]), 1)
+  const maxAskSize = Math.max(...a.map(x => x[1]), 1)
+  const bidBars = b.map(x => '█'.repeat(Math.max(1, Math.round((x[1] / maxBidSize) * width))))
+  const askBars = a.map(x => '█'.repeat(Math.max(1, Math.round((x[1] / maxAskSize) * width))))
+
+  const lines = []
+  lines.push(`Mid: ${mid ?? '—'}`)
+  lines.push('Bids'.padEnd(width) + '  Price        ' + 'Asks')
+  const rows = Math.max(b.length, a.length)
+  for (let i = 0; i < rows; i++) {
+    const lb = i < b.length ? bidBars[i].padEnd(width) : ' '.repeat(width)
+    const bp = i < b.length ? String(b[i][0]).padStart(8) : ' '.repeat(8)
+    const ap = i < a.length ? String(a[i][0]).padEnd(8) : ' '.repeat(8)
+    const la = i < a.length ? askBars[i] : ''
+    lines.push(`${lb}  ${bp}  |  ${ap} ${la}`)
+  }
+  return lines.join('\n')
+}
 
 // --- Discord client ---
 const client = new Client({ intents: [GatewayIntentBits.Guilds] })
@@ -83,29 +106,24 @@ client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return
   if (interaction.commandName === 'orders') {
     const ticker = (interaction.options.getString('ticker') || '').trim().toUpperCase()
-    const wantsOptions = interaction.options.getBoolean('options') || false
-    const type = interaction.options.getString('type') || undefined
-    const expiry = interaction.options.getString('expiry') || undefined
+    const includeBook = interaction.options.getBoolean('book') ?? true
 
     await interaction.deferReply() // public reply
     try {
       if (!ticker) {
-        await interaction.editReply('Please provide a ticker, e.g., /orders ticker:AAPL')
+        await interaction.editReply('Please provide a crypto ticker, e.g., /orders ticker:BTC')
         return
       }
-      if (!wantsOptions) {
-        const quote = await market.getQuote(ticker)
-        await interaction.editReply(formatQuote(ticker, quote))
+      const symbol = ticker
+      const quote = await market.getCryptoQuote(symbol)
+      if (!includeBook) {
+        await interaction.editReply(formatPriceLine(symbol, quote))
         return
       }
-
-      // options flow
-      if (!type || !expiry) {
-        await interaction.editReply('When options=true, you must provide both type (call/put) and expiry (MM/DD/YY).')
-        return
-      }
-      const table = await market.getOptionsSlice(ticker, type, expiry)
-      await interaction.editReply(table)
+      const book = await market.getCryptoOrderBook(symbol)
+      const chart = renderDepthChart(book)
+      const header = formatPriceLine(symbol, quote)
+      await interaction.editReply(`${header}\n\n${chart}`)
     } catch (err) {
       console.error(err)
       await interaction.editReply('Error fetching data. Check logs.')
