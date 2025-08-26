@@ -12,6 +12,16 @@
 				"$eslint-stylish"
 			],
 			"group": "build"
+		},
+		{
+			"label": "run-bot-dev",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"run",
+				"dev"
+			],
+			"group": "build"
 		}
 	]
 }

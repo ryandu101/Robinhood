@@ -4,9 +4,10 @@
   "private": true,
   "type": "commonjs",
   "scripts": {
-    "start": "node ./src/discord-bot.js",
-    "register": "node -e \"require('dotenv').config(); require('./src/discord-bot').__register?.().catch(console.error)\"",
-    "dev": "node ./src/discord-bot.js"
+  "start": "node ./src/discord-bot.js",
+  "register": "node -e \"require('dotenv').config(); require('./src/discord-bot').__register?.().catch(console.error)\"",
+  "dev": "node ./src/discord-bot.js",
+  "dev:debug": "node --trace-warnings --trace-uncaught ./src/discord-bot.js"
   },
   "dependencies": {
     "discord.js": "^14.16.3",
